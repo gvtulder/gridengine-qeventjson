@@ -1,0 +1,6 @@
+This is a modified version of the GridEngine GE2011.11p1 source. This adds the qeventjson utility, which outputs cluster events as JSON objects.
+
+The build-on-bigr-cluster.sh script in source/ can be used to build this thing on the BIGR app nodes. You can then copy qeventjson to somewhere else.
+
+Gijs van Tulder
+May 2015
