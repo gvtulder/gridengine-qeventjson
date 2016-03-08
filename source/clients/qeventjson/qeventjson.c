@@ -209,6 +209,8 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
 
    if (event_type == sgeE_JOB_LIST) {
      // initial job list
+     print_json("{s:s}", "event", "JOB_LIST_START");
+
      lList *jobs = lGetList(event,ET_new_version);
      lListElem *job = lFirst(jobs);
 
@@ -588,6 +590,7 @@ static void qeventjson_subscribe_mode(sge_evc_class_t *evc)
       print_json("{s:s}", "event", "END_BATCH");
       if (error == SGE_EM_TIMEOUT && !shut_me_down) {
          printf("# error was SGE_EM_TIMEOUT\n");
+         print_json("{s:s,s:s}", "event", "SGE_ERROR", "error", "SGE_EM_TIMEOUT");
          sleep(10);
          continue;
       }
