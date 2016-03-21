@@ -39,15 +39,15 @@ QEVENTJSON_TARGETS = qeventjson
 QEVENTJSON_SRC = qeventjson.c
 
 QEVENTJSON_ADD_SRC = \
-               usage.c sig_handlers.c sge_options.c sge_mt_init.c frozen.c
+               usage.c sig_handlers.c sge_options.c sge_mt_init.c frozen.c sge_cqueue_qstat.c sge_qstat.c
 
 QEVENTJSON_OBJS = $(QEVENTJSON_SRC:.c=.o) 
 
 QEVENTJSON_ADD_OBJS = $(QEVENTJSON_ADD_SRC:.c=.o)
 
-QEVENTJSON_ADD_LIBS = -lmir -levc -lgdi -lsgeobj -lsgeobjd $(SECLIB) $(KRBLIB) -lcull -lcomm -lcommlists -luti $(WINGRIDLIB) -llck -lrmon $(DLLIB)
+QEVENTJSON_ADD_LIBS = -lmir -levc -lsched -lgdi -lsgeobj -lsgeobjd $(SECLIB) $(KRBLIB) -lcull -lcomm -lcommlists -luti $(WINGRIDLIB) -llck -lrmon $(DLLIB)
 
-QEVENTJSON_LIB_DEPENDS = $(MIRLIB) $(EVCLIB) $(GDILIB) $(SGEOBJLIB) $(SGEOBJDLIB) $(KRBLIBS) $(CULLLIB) $(COMMLIB) $(COMMLISTSLIB) $(WINGRIDLIB_DEP) $(UTILIB) $(LCKLIB) $(RMONLIB) $(TPLIB)
+QEVENTJSON_LIB_DEPENDS = $(MIRLIB) $(EVCLIB) $(GDILIB) $(SGEOBJLIB) $(SGEOBJDLIB) $(KRBLIBS) $(CULLLIB) $(COMMLIB) $(COMMLISTSLIB) $(WINGRIDLIB_DEP) $(UTILIB) $(LCKLIB) $(RMONLIB) $(TPLIB) $(SCHEDLIB)
 
 ###############################################################################
 # global rules: all, clean, depend, messages

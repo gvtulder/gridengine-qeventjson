@@ -58,6 +58,8 @@
 #include "sge_prog.h"
 #include "sgermon.h"
 #include "sge_log.h"
+#include "sched/sort_hosts.h"
+#include "sched/sge_complex_schedd.h"
 
 #include "msg_clients_common.h"
 #include "msg_common.h"
@@ -69,14 +71,56 @@
 #include "sge_feature.h"
 #include "sge_spool.h"
 #include "qeventjson.h"
+#include "sge_qquota.h"
+#include "sge_qstat.h"
 #include "sge_profiling.h"
 #include "sge_mt_init.h"
 #include "sgeobj/sge_job.h"
 #include "sgeobj/sge_range.h"
+#include "sgeobj/sge_host.h"
+#include "sgeobj/sge_centry.h"
+#include "sgeobj/sge_resource_quota.h"
+#include "sgeobj/sge_ulong.h"
 
 #include "gdi/sge_gdi_ctx.h"
 
 #include "frozen.h"
+
+/****** qquota_output/qquota_get_next_filter() *********************************
+*  NAME
+*     qquota_get_next_filter() -- tokenize rue_name of usage
+*
+*  SYNOPSIS
+*     static char* qquota_get_next_filter(char *filter, const char *cp)
+*
+*  FUNCTION
+*     The rue_name has the type /user_name/project_name/pe_name/queue_name/host_name.
+*     This function tokenizes the rue_name and gives always one element back
+*
+*  INPUTS
+*     char *filter   - store for the token
+*     const char *cp - pointer to rue_name
+*
+*  RESULT
+*     static char* - pointer for the next token
+*
+*  NOTES
+*     MT-NOTE: qquota_get_next_filter() is not MT safe
+*
+*******************************************************************************/
+static char *qquota_get_next_filter(stringT filter, const char *cp)
+{
+   char *ret = NULL;
+
+   ret = strchr(cp, '/')+1;
+   if (ret - cp < MAX_STRING_SIZE && ret - cp > 1) {
+      snprintf(filter, ret - cp, "%s", cp);
+   } else {
+      sprintf(filter, "-");
+   }
+
+   return ret;
+}
 
 static void qeventjson_subscribe_mode(sge_evc_class_t *evc);
 
@@ -120,6 +164,39 @@ make_json_queue_list(char *json_buffer, lListElem *qp) {
   }
   json_buffer[0] = ']';
   json_buffer[1] = '\0';
+}
+
+static void
+list_to_json_dstring(dstring *buffer, lList *list, int field) {
+  const char *str;
+  char json_tmp[250];
+  bool first = true;
+  lListElem *el;
+
+  sge_dstring_append(buffer, "[");
+  for_each(el, list) {
+    if (!first) {
+      sge_dstring_append(buffer, ",");
+    }
+    str = lGetString(el, field);
+    json_emit_quoted_str(json_tmp, 50, str, strlen(str));
+    sge_dstring_append(buffer, json_tmp);
+    first = false;
+  }
+  sge_dstring_append(buffer, "]");
+}
+
+static void
+format_json_as_dstring(dstring *buffer, const char *format, ...) {
+   // print json
+   char json_buffer[1024*12];
+   va_list argptr;
+   va_start(argptr, format);
+   int jsonlen = json_emit_va(json_buffer, sizeof(json_buffer), format, argptr);
+   va_end(argptr);
+   if (jsonlen < sizeof(json_buffer)) {
+     sge_dstring_append(buffer, json_buffer);
+   }
 }
 
 static void
@@ -187,6 +264,284 @@ static void print_jobs_not_enrolled(u_long32 event_type, u_long32 timestamp, u_l
 
    job_destroy_hold_id_lists(job, range_list); 
 }                 
+
+
+static bool
+print_qquota_filter_as_json(lListElem *filter, const char *name, const char *value,
+                            dstring *buffer, bool prependComma) {
+  if (filter != NULL) {
+    if (prependComma)
+       sge_dstring_append_char(buffer, ',');
+    if (!lGetBool(filter, RQRF_expand) || value == NULL) {
+      format_json_as_dstring(buffer, "s:{s:", name, "include");
+      list_to_json_dstring(buffer, lGetList(filter, RQRF_scope), ST_name);
+      sge_dstring_append(buffer, ",\"exclude\":");
+      list_to_json_dstring(buffer, lGetList(filter, RQRF_xscope), ST_name);
+      sge_dstring_append(buffer, "}");
+    } else {
+      format_json_as_dstring(buffer, "s:s", name, value);
+    }
+    return true;
+  } else {
+    return false;
+  }
+}
+
+static void
+print_quota_rule_as_json(const char *event, u_long32 timestamp, const char *key, lList *centry_list, lList *exechost_list, lListElem *rqs) {
+   dstring json_buffer = DSTRING_INIT;
+   format_json_as_dstring(&json_buffer, "{s:s,s:u,s:s,s:S,s:[",
+                                        "event", event,
+                                        "timestamp", timestamp,
+                                        "key", (key == NULL ? lGetString(rqs, RQS_name) : key),
+                                        "enabled", (lGetBool(rqs, RQS_enabled) ? "true" : "false"),
+                                        "rules");
+
+   lListElem* global_host = NULL;
+   lListElem* exec_host = NULL;
+
+   lListElem *rule = NULL;
+   dstring rule_name = DSTRING_INIT;
+   int rule_count = 1;
+   bool firstRule = true;
+   bool firstLimit = true;
+
+   for_each(rule, lGetList(rqs, RQS_rule)) {
+     lListElem *limit = NULL;
+
+     if (lGetString(rule, RQR_name)) {
+       sge_dstring_sprintf(&rule_name, "%s/%s", lGetString(rqs, RQS_name), lGetString(rule, RQR_name));
+     } else {
+       sge_dstring_sprintf(&rule_name, "%s/%d", lGetString(rqs, RQS_name), rule_count);
+     }
+
+     if (!firstRule)
+       sge_dstring_append_char(&json_buffer, ',');
+     firstRule = false;
+     format_json_as_dstring(&json_buffer, "{s:s,s:[",
+                                          "rule_name", sge_dstring_get_string(&rule_name),
+                                          "limits");
+
+     firstLimit = true;
+     for_each(limit, lGetList(rule, RQR_limit)) {
+       const char *limit_name = lGetString(limit, RQRL_name);
+       lList *rue_list = lGetList(limit, RQRL_usage);
+       lListElem *raw_centry = centry_list_locate(centry_list, limit_name);
+       lListElem *rue_elem = NULL;
+
+       if (raw_centry == NULL) {
+         /* undefined centries can be ignored */
+         continue;
+       }
+
+       if (lGetUlong(raw_centry, CE_consumable)) {
+         /* for consumables we need to walk through the utilization and search for matching values */
+         for_each(rue_elem, rue_list) {
+           u_long32 dominant = 0;
+           const char *rue_name = lGetString(rue_elem, RUE_name);
+           char *cp = NULL;
+           stringT user = "", project = "", pe = "", queue = "", host = "";
+           dstring limit_str = DSTRING_INIT;
+           dstring value_str = DSTRING_INIT;
+
+           /* check user name */
+           cp = qquota_get_next_filter(user, rue_name);
+           /* check project */
+           cp = qquota_get_next_filter(project, cp);
+           /* check parallel environment */
+           cp = qquota_get_next_filter(pe, cp);
+           /* check cluster queue */
+           cp = qquota_get_next_filter(queue, cp);
+           /* check host name */
+           cp = qquota_get_next_filter(host, cp);
+           if (lGetBool(limit, RQRL_dynamic)) {
+             exec_host = host_list_locate(exechost_list, host);
+             sge_dstring_sprintf(&limit_str, "%d", (int)scaled_mixed_load(lGetString(limit, RQRL_value),
+                                                                          global_host, exec_host, centry_list));
+
+           } else {
+             lSetDouble(raw_centry, CE_pj_doubleval, lGetDouble(limit, RQRL_dvalue));
+             sge_get_dominant_stringval(raw_centry, &dominant, &limit_str);
+           }
+
+           lSetDouble(raw_centry,CE_pj_doubleval, lGetDouble(rue_elem, RUE_utilized_now));
+           sge_get_dominant_stringval(raw_centry, &dominant, &value_str);
+
+           // convert filters to json
+           dstring filter_str = DSTRING_INIT;
+           sge_dstring_append_char(&filter_str, '{');
+           bool notFirstFilter = false;
+           notFirstFilter = print_qquota_filter_as_json(lGetObject(rule, RQR_filter_users), "users", user, &filter_str, notFirstFilter) || notFirstFilter;
+           notFirstFilter = print_qquota_filter_as_json(lGetObject(rule, RQR_filter_projects), "projects", project, &filter_str, notFirstFilter) || notFirstFilter;
+           notFirstFilter = print_qquota_filter_as_json(lGetObject(rule, RQR_filter_pes), "pes", pe, &filter_str, notFirstFilter) || notFirstFilter;
+           notFirstFilter = print_qquota_filter_as_json(lGetObject(rule, RQR_filter_queues), "queues", queue, &filter_str, notFirstFilter) || notFirstFilter;
+           notFirstFilter = print_qquota_filter_as_json(lGetObject(rule, RQR_filter_hosts), "hosts", host, &filter_str, notFirstFilter) || notFirstFilter;
+           sge_dstring_append_char(&filter_str, '}');
+
+           if (!firstLimit)
+             sge_dstring_append_char(&json_buffer, ',');
+           firstLimit = false;
+           format_json_as_dstring(&json_buffer,
+                      "{s:s,s:s,s:s,s:s,s:s,s:s,s:S,s:s,s:s}",
+                      "limit_name", limit_name,
+                      "user", user,
+                      "project", project,
+                      "pe", pe,
+                      "queue", queue,
+                      "host", host,
+                      "filters", sge_dstring_get_string(&filter_str),
+                      "usage_value", sge_dstring_get_string(&value_str),
+                      "limit_value", sge_dstring_get_string(&limit_str));
+
+           sge_dstring_free(&filter_str);
+           sge_dstring_free(&limit_str);
+           sge_dstring_free(&value_str);
+         }
+       } else {
+         /* static values */
+         if (!firstLimit)
+           sge_dstring_append_char(&json_buffer, ',');
+         firstLimit = false;
+         format_json_as_dstring(&json_buffer,
+                    "{s:s,s:s}",
+                    "limit_name", limit_name,
+                    "limit_value", lGetString(limit, RQRL_value));
+       }
+     }
+
+     sge_dstring_append(&json_buffer, "]}");
+   }
+   rule_count++;
+
+   sge_dstring_append(&json_buffer, "]}");
+   printf("%s\n", sge_dstring_get_string(&json_buffer));
+
+   sge_dstring_free(&rule_name);
+   sge_dstring_free(&json_buffer);
+}
+
+static void
+print_host_as_json(const char *event, u_long32 timestamp, lList *host_list, lListElem *host, lList *centry_list) {
+   dstring json_buffer = DSTRING_INIT;
+   format_json_as_dstring(&json_buffer, "{s:s,s:u,s:s,s:{",
+                                        "event", event,
+                                        "timestamp", timestamp,
+                                        "name", lGetHost(host, EH_name),
+                                        "consumables");
+
+   lListElem *rep;
+   int first = 1;
+
+   const lList *ce_values = lGetList(host, EH_consumable_config_list);
+   for_each(rep, ce_values) {
+     if (first > 1)
+       sge_dstring_append_char(&json_buffer, ',');
+     format_json_as_dstring(&json_buffer, "s:s", lGetString(rep, CE_name), lGetString(rep, CE_stringval));
+     first++;
+   }
+
+   format_json_as_dstring(&json_buffer, "},s:{",
+                                        "values");
+
+   lList *rlp = NULL;
+   char dom[5];
+   dstring resource_string = DSTRING_INIT;
+   const char *s;
+   u_long32 dominant;
+
+   first = 1;
+   host_complexes2scheduler(&rlp, host, host_list, centry_list);
+   for_each(rep, rlp) {
+      u_long32 type = lGetUlong(rep, CE_valtype);
+
+      sge_dstring_clear(&resource_string);
+
+      switch (type) {
+         case TYPE_HOST:
+         case TYPE_STR:
+         case TYPE_CSTR:
+         case TYPE_RESTR:
+            if (!(lGetUlong(rep, CE_pj_dominant)&DOMINANT_TYPE_VALUE)) {
+               dominant = lGetUlong(rep, CE_pj_dominant);
+               s = lGetString(rep, CE_pj_stringval);
+            } else {
+               dominant = lGetUlong(rep, CE_dominant);
+               s = lGetString(rep, CE_stringval);
+            }
+            break;
+         case TYPE_TIM:
+            if (!(lGetUlong(rep, CE_pj_dominant)&DOMINANT_TYPE_VALUE)) {
+               double val = lGetDouble(rep, CE_pj_doubleval);
+
+               dominant = lGetUlong(rep, CE_pj_dominant);
+               double_print_time_to_dstring(val, &resource_string);
+               s = sge_dstring_get_string(&resource_string);
+            } else {
+               double val = lGetDouble(rep, CE_doubleval);
+
+               dominant = lGetUlong(rep, CE_dominant);
+               double_print_time_to_dstring(val, &resource_string);
+               s = sge_dstring_get_string(&resource_string);
+            }
+            break;
+         case TYPE_MEM:
+            if (!(lGetUlong(rep, CE_pj_dominant)&DOMINANT_TYPE_VALUE)) {
+               double val = lGetDouble(rep, CE_pj_doubleval);
+
+               dominant = lGetUlong(rep, CE_pj_dominant);
+               double_print_memory_to_dstring(val, &resource_string);
+               s = sge_dstring_get_string(&resource_string);
+            } else {
+               double val = lGetDouble(rep, CE_doubleval);
+
+               dominant = lGetUlong(rep, CE_dominant);
+               double_print_memory_to_dstring(val, &resource_string);
+               s = sge_dstring_get_string(&resource_string);
+            }
+            break;
+         default:
+            if (!(lGetUlong(rep, CE_pj_dominant)&DOMINANT_TYPE_VALUE)) {
+               double val = lGetDouble(rep, CE_pj_doubleval);
+
+               dominant = lGetUlong(rep, CE_pj_dominant);
+               double_print_to_dstring(val, &resource_string);
+               s = sge_dstring_get_string(&resource_string);
+            } else {
+               double val = lGetDouble(rep, CE_doubleval);
+
+               dominant = lGetUlong(rep, CE_dominant);
+               double_print_to_dstring(val, &resource_string);
+               s = sge_dstring_get_string(&resource_string);
+            }
+            break;
+      }
+      monitor_dominance(dom, dominant);
+      switch(lGetUlong(rep, CE_valtype)) {
+         case TYPE_INT:
+         case TYPE_DOUBLE:
+            if (first > 1)
+              sge_dstring_append_char(&json_buffer, ',');
+            format_json_as_dstring(&json_buffer, "s:S", lGetString(rep, CE_name), s);
+            first++;
+            break;
+         case TYPE_TIM:
+         case TYPE_MEM:
+         case TYPE_BOO:
+         default:
+            if (first > 1)
+              sge_dstring_append_char(&json_buffer, ',');
+            format_json_as_dstring(&json_buffer, "s:s", lGetString(rep, CE_name), s);
+            first++;
+            break;
+      }
+   }
+   lFreeList(&rlp);
+   sge_dstring_free(&resource_string);
+
+   sge_dstring_append(&json_buffer, "}}");
+   printf("%s\n", sge_dstring_get_string(&json_buffer));
+   sge_dstring_free(&json_buffer);
+}
 
 static sge_callback_result 
 print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_type type, 
@@ -502,6 +857,66 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
                   "end_time", end_time,
                   "exit_status", exit_status);
      }
+
+   } else if (event_type == sgeE_RQS_LIST) {
+     // initial resource quota list
+     lList *centry_list = *sge_master_list(object_base, SGE_TYPE_CENTRY);
+     lList *exechost_list = *sge_master_list(object_base, SGE_TYPE_EXECHOST);
+
+     lList *rqs_list = lGetList(event,ET_new_version);
+     lListElem *rqs = NULL;
+
+     for_each(rqs, rqs_list) {
+       print_quota_rule_as_json("RQS_LIST", timestamp, NULL, centry_list, exechost_list, rqs);
+     }
+
+   } else if (event_type == sgeE_RQS_ADD ||
+              event_type == sgeE_RQS_MOD) {
+     // event for resource quota rule
+     lList *centry_list = *sge_master_list(object_base, SGE_TYPE_CENTRY);
+     lList *exechost_list = *sge_master_list(object_base, SGE_TYPE_EXECHOST);
+
+     const char *key = lGetString(event, ET_strkey);
+
+     lList *rqs_list = lGetList(event,ET_new_version);
+     lListElem *rqs = lFirst(rqs_list);
+
+     print_quota_rule_as_json((event_type == sgeE_RQS_ADD ? "RQS_ADD" : "RQS_MOD"), timestamp, key, centry_list, exechost_list, rqs);
+
+   } else if (event_type == sgeE_RQS_DEL) {
+     // event for resource quota rule
+     const char *key = lGetString(event, ET_strkey);
+     print_json("{s:s,s:u,s:s}",
+                "event", "RQS_DEL",
+                "timestamp", timestamp,
+                "key", key);
+
+   } else if (event_type == sgeE_EXECHOST_LIST ||
+              event_type == sgeE_EXECHOST_ADD ||
+              event_type == sgeE_EXECHOST_MOD) {
+     // initial exechost list
+     lList *centry_list = *sge_master_list(object_base, SGE_TYPE_CENTRY);
+     lList *host_list = lGetList(event,ET_new_version);
+     lListElem *host = NULL;
+
+     char *event_str = NULL;
+     switch (event_type) {
+       case sgeE_EXECHOST_LIST: event_str = "EXECHOST_LIST"; break;
+       case sgeE_EXECHOST_ADD: event_str = "EXECHOST_ADD"; break;
+       case sgeE_EXECHOST_MOD: event_str = "EXECHOST_MOD"; break;
+     }
+
+     for_each(host, host_list) {
+       print_host_as_json(event_str, timestamp, host_list, host, centry_list);
+     }
+
+   } else if (event_type == sgeE_EXECHOST_DEL) {
+     // event for exechost
+     const char *key = lGetString(event, ET_strkey);
+     print_json("{s:s,s:u,s:s}",
+                "event", "EXECHOST_DEL",
+                "timestamp", timestamp,
+                "name", key);
    }
    
    return SGE_EMA_OK;
@@ -567,7 +982,7 @@ static void qeventjson_subscribe_mode(sge_evc_class_t *evc)
 {
    sge_object_type event_type = SGE_TYPE_ADMINHOST;
    
-   sge_mirror_initialize(evc, EV_ID_ANY, "qevent", true,
+   sge_mirror_initialize(evc, EV_ID_ANY, "qeventjson", true,
                          NULL, NULL, NULL, NULL, NULL);
    sge_mirror_subscribe(evc, SGE_TYPE_SHUTDOWN, print_event, NULL, NULL, NULL, NULL);
    sge_mirror_subscribe(evc, SGE_TYPE_ADMINHOST, print_event, NULL, NULL, NULL, NULL);
@@ -578,10 +993,11 @@ static void qeventjson_subscribe_mode(sge_evc_class_t *evc)
    printf("# ec_get_edtime: %d\n", evc->ec_get_edtime(evc));
 
    printf("# Subscribe event_type: %d\n", event_type);
-   sge_mirror_subscribe(evc, SGE_TYPE_JOB, print_event, NULL, NULL, NULL, NULL);
-   sge_mirror_subscribe(evc, SGE_TYPE_JATASK, print_event, NULL, NULL, NULL, NULL);
+   // mirror job and job task events
+   sge_mirror_subscribe(evc, SGE_TYPE_ALL, print_event, NULL, NULL, NULL, NULL);
 
    printf("# Set flush...\n");
+   // set the flush time for these events to 0 (immediate)
    evc->ec_set_flush(evc, sgeE_JOB_ADD, true, 0);
    evc->ec_set_flush(evc, sgeE_JOB_MOD, true, 0);
    evc->ec_set_flush(evc, sgeE_JOB_DEL, true, 0);
