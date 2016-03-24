@@ -167,21 +167,43 @@ make_json_queue_list(char *json_buffer, lListElem *qp) {
 }
 
 static void
-list_to_json_dstring(dstring *buffer, lList *list, int field) {
+string_list_to_json_dstring(dstring *buffer, lList *list, int field) {
   const char *str;
   char json_tmp[250];
   bool first = true;
   lListElem *el;
 
   sge_dstring_append(buffer, "[");
-  for_each(el, list) {
-    if (!first) {
-      sge_dstring_append(buffer, ",");
+  if (list) {
+    for_each(el, list) {
+      if (!first) {
+        sge_dstring_append(buffer, ",");
+      }
+      str = lGetString(el, field);
+      json_emit_quoted_str(json_tmp, 50, str, strlen(str));
+      sge_dstring_append(buffer, json_tmp);
+      first = false;
     }
-    str = lGetString(el, field);
-    json_emit_quoted_str(json_tmp, 50, str, strlen(str));
-    sge_dstring_append(buffer, json_tmp);
-    first = false;
+  }
+  sge_dstring_append(buffer, "]");
+}
+
+static void
+ulong_list_to_json_dstring(dstring *buffer, lList *list, int field) {
+  char json_tmp[250];
+  bool first = true;
+  lListElem *el;
+
+  sge_dstring_append(buffer, "[");
+  if (list) {
+    for_each(el, list) {
+      if (!first) {
+        sge_dstring_append(buffer, ",");
+      }
+      json_emit_ulong(json_tmp, 50, lGetUlong(el, field));
+      sge_dstring_append(buffer, json_tmp);
+      first = false;
+    }
   }
   sge_dstring_append(buffer, "]");
 }
@@ -214,7 +236,7 @@ print_json(const char *format, ...) {
    fflush(stdout);
 }
 
-static void print_jobs_not_enrolled(u_long32 event_type, u_long32 timestamp, u_long job_id, lListElem *job, const char *job_name, const char *owner, const char *queues_json, const char *resources_json, u_long n_slots, u_long submission_time) {
+static void print_jobs_not_enrolled(u_long32 event_type, u_long32 timestamp, u_long job_id, lListElem *job, const char *job_name, const char *owner, const char *queues_json, const char *resources_json, u_long n_slots, dstring *predecessor_request_list, dstring *predecessor_list, dstring *ad_predecessor_request_list, dstring *ad_predecessor_list, u_long submission_time) {
    lList *range_list[16];         /* RN_Type */
    u_long32 hold_state[16];
    int i;
@@ -243,7 +265,7 @@ static void print_jobs_not_enrolled(u_long32 event_type, u_long32 timestamp, u_l
                job_get_state_string(status_str, jstate);
 
                // print json
-               print_json("{s:s,s:u,s:i,s:i,s:s,s:s,s:S,s:S,s:u,s:u,s:f,s:s,s:u}",
+               print_json("{s:s,s:u,s:i,s:i,s:s,s:s,s:S,s:S,s:u,s:S,s:S,s:S,s:S,s:u,s:f,s:s,s:u}",
                           "event", (event_type==sgeE_JOB_ADD?"JOB_ADD":(event_type==sgeE_JOB_MOD?"JOB_MOD":"JOB_LIST")),
                           "timestamp", timestamp,
                           "job_id", job_id,
@@ -253,6 +275,10 @@ static void print_jobs_not_enrolled(u_long32 event_type, u_long32 timestamp, u_l
                           "queues", queues_json,
                           "resources", resources_json,
                           "nslots", n_slots,
+                          "predecessor_request_list", sge_dstring_get_string(predecessor_request_list),
+                          "predecessor_list", sge_dstring_get_string(predecessor_list),
+                          "ad_predecessor_request_list", sge_dstring_get_string(ad_predecessor_request_list),
+                          "ad_predecessor_list", sge_dstring_get_string(ad_predecessor_list),
                           "submission_time", submission_time,
                           "prio", prio,
                           "state", status_str,
@@ -274,9 +300,9 @@ print_qquota_filter_as_json(lListElem *filter, const char *name, const char *val
        sge_dstring_append_char(buffer, ',');
     if (!lGetBool(filter, RQRF_expand) || value == NULL) {
       format_json_as_dstring(buffer, "s:{s:", name, "include");
-      list_to_json_dstring(buffer, lGetList(filter, RQRF_scope), ST_name);
+      string_list_to_json_dstring(buffer, lGetList(filter, RQRF_scope), ST_name);
       sge_dstring_append(buffer, ",\"exclude\":");
-      list_to_json_dstring(buffer, lGetList(filter, RQRF_xscope), ST_name);
+      string_list_to_json_dstring(buffer, lGetList(filter, RQRF_xscope), ST_name);
       sge_dstring_append(buffer, "}");
     } else {
       format_json_as_dstring(buffer, "s:s", name, value);
@@ -592,6 +618,16 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
        // number of slots
        u_long n_slots = range_list_get_first_id(lGetList(job, JB_pe_range), NULL);
 
+       // predecessor lists
+       dstring predecessor_request_list = DSTRING_INIT;
+       dstring predecessor_list = DSTRING_INIT;
+       dstring ad_predecessor_request_list = DSTRING_INIT;
+       dstring ad_predecessor_list = DSTRING_INIT;
+       string_list_to_json_dstring(&predecessor_request_list, lGetList(job, JB_jid_request_list), JRE_job_name);
+       ulong_list_to_json_dstring(&predecessor_list, lGetList(job, JB_jid_predecessor_list), JRE_job_number);
+       string_list_to_json_dstring(&ad_predecessor_request_list, lGetList(job, JB_ja_ad_request_list), JRE_job_name);
+       ulong_list_to_json_dstring(&ad_predecessor_list, lGetList(job, JB_ja_ad_predecessor_list), JRE_job_number);
+
        lList *jatasks = lGetList(job, JB_ja_tasks);
        lListElem *jatask = lFirst(jatasks);
        while (jatask != NULL) {
@@ -615,7 +651,7 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
 
          if (running_queue == NULL) {
            // print json
-           print_json("{s:s,s:u,s:u,s:u,s:s,s:s,s:S,s:S,s:u,s:u,s:u,s:f,s:s}",
+           print_json("{s:s,s:u,s:u,s:u,s:s,s:s,s:S,s:S,s:u,s:S,s:S,s:S,s:S,s:u,s:u,s:f,s:s}",
                       "event", "JOB_LIST",
                       "timestamp", timestamp,
                       "job_id", job_id,
@@ -625,13 +661,17 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
                       "queues", queues_json,
                       "resources", resources_json,
                       "nslots", n_slots,
+                      "predecessor_request_list", sge_dstring_get_string(&predecessor_request_list),
+                      "predecessor_list", sge_dstring_get_string(&predecessor_list),
+                      "ad_predecessor_request_list", sge_dstring_get_string(&ad_predecessor_request_list),
+                      "ad_predecessor_list", sge_dstring_get_string(&ad_predecessor_list),
                       "submission_time", submission_time,
                       "start_time", start_time,
                       "prio", prio,
                       "state", status_str);
          } else {
            // print json
-           print_json("{s:s,s:u,s:u,s:u,s:s,s:s,s:S,s:S,s:u,s:u,s:u,s:s,s:f,s:s}",
+           print_json("{s:s,s:u,s:u,s:u,s:s,s:s,s:S,s:S,s:u,s:S,s:S,s:S,s:S,s:u,s:u,s:s,s:f,s:s}",
                       "event", "JOB_LIST",
                       "timestamp", timestamp,
                       "job_id", job_id,
@@ -641,6 +681,10 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
                       "queues", queues_json,
                       "resources", resources_json,
                       "nslots", n_slots,
+                      "predecessor_request_list", sge_dstring_get_string(&predecessor_request_list),
+                      "predecessor_list", sge_dstring_get_string(&predecessor_list),
+                      "ad_predecessor_request_list", sge_dstring_get_string(&ad_predecessor_request_list),
+                      "ad_predecessor_list", sge_dstring_get_string(&ad_predecessor_list),
                       "submission_time", submission_time,
                       "start_time", start_time,
                       "running_queue", running_queue,
@@ -651,7 +695,12 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
          jatask = lNext(jatask);
        }
 
-       print_jobs_not_enrolled(event_type, timestamp, job_id, job, job_name, owner, queues_json, resources_json, n_slots, submission_time);
+       print_jobs_not_enrolled(event_type, timestamp, job_id, job, job_name, owner, queues_json, resources_json, n_slots, &predecessor_request_list, &predecessor_list, &ad_predecessor_request_list, &ad_predecessor_list, submission_time);
+
+       sge_dstring_free(&predecessor_request_list);
+       sge_dstring_free(&predecessor_list);
+       sge_dstring_free(&ad_predecessor_request_list);
+       sge_dstring_free(&ad_predecessor_list);
 
        job = lNext(job);
      }
@@ -684,6 +733,16 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
      // number of slots
      u_long n_slots = range_list_get_first_id(lGetList(job, JB_pe_range), NULL);
 
+     // predecessor lists
+     dstring predecessor_request_list = DSTRING_INIT;
+     dstring predecessor_list = DSTRING_INIT;
+     dstring ad_predecessor_request_list = DSTRING_INIT;
+     dstring ad_predecessor_list = DSTRING_INIT;
+     string_list_to_json_dstring(&predecessor_request_list, lGetList(job, JB_jid_request_list), JRE_job_name);
+     ulong_list_to_json_dstring(&predecessor_list, lGetList(job, JB_jid_predecessor_list), JRE_job_number);
+     string_list_to_json_dstring(&ad_predecessor_request_list, lGetList(job, JB_ja_ad_request_list), JRE_job_name);
+     ulong_list_to_json_dstring(&ad_predecessor_list, lGetList(job, JB_ja_ad_predecessor_list), JRE_job_number);
+
      // memory required
      char resources_json[1000];
      make_json_resource_list(resources_json, lFirst(lGetList(job, JB_hard_resource_list)));
@@ -691,7 +750,7 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
      // for a specific task?
      if (task_id == 0) {
        // no specific task
-       print_jobs_not_enrolled(event_type, timestamp, job_id, job, job_name, owner, queues_json, resources_json, n_slots, submission_time);
+       print_jobs_not_enrolled(event_type, timestamp, job_id, job, job_name, owner, queues_json, resources_json, n_slots, &predecessor_request_list, &predecessor_list, &ad_predecessor_request_list, &ad_predecessor_list, submission_time);
 
      } else {
        lList *jatasks = lGetList(job, JB_ja_tasks);
@@ -703,7 +762,7 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
 
        if (running_queue == NULL) {
          // print json
-         print_json("{s:s,s:u,s:u,s:u,s:s,s:s,s:S,s:S,s:u,s:u}",
+         print_json("{s:s,s:u,s:u,s:u,s:s,s:s,s:S,s:S,s:u,s:S,s:S,s:S,s:S,s:u}",
                     "event", (event_type==sgeE_JOB_ADD?"JOB_ADD":"JOB_MOD"),
                     "timestamp", timestamp,
                     "job_id", job_id,
@@ -713,10 +772,14 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
                     "queues", queues_json,
                     "resources", resources_json,
                     "nslots", n_slots,
+                    "predecessor_request_list", sge_dstring_get_string(&predecessor_request_list),
+                    "predecessor_list", sge_dstring_get_string(&predecessor_list),
+                    "ad_predecessor_request_list", sge_dstring_get_string(&ad_predecessor_request_list),
+                    "ad_predecessor_list", sge_dstring_get_string(&ad_predecessor_list),
                     "submission_time", submission_time);
        } else {
          // print json
-         print_json("{s:s,s:u,s:u,s:u,s:s,s:s,s:S,s:S,s:s,s:u,s:u}",
+         print_json("{s:s,s:u,s:u,s:u,s:s,s:s,s:S,s:S,s:s,s:u,s:S,s:S,s:S,s:S,s:u}",
                     "event", (event_type==sgeE_JOB_ADD?"JOB_ADD":"JOB_MOD"),
                     "timestamp", timestamp,
                     "job_id", job_id,
@@ -727,9 +790,18 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
                     "resources", resources_json,
                     "running_queue", running_queue,
                     "nslots", n_slots,
+                    "predecessor_request_list", sge_dstring_get_string(&predecessor_request_list),
+                    "predecessor_list", sge_dstring_get_string(&predecessor_list),
+                    "ad_predecessor_request_list", sge_dstring_get_string(&ad_predecessor_request_list),
+                    "ad_predecessor_list", sge_dstring_get_string(&ad_predecessor_list),
                     "submission_time", submission_time);
        }
      }
+
+     sge_dstring_free(&predecessor_request_list);
+     sge_dstring_free(&predecessor_list);
+     sge_dstring_free(&ad_predecessor_request_list);
+     sge_dstring_free(&ad_predecessor_list);
 
    } else if (event_type == sgeE_JOB_DEL) {
      // event for job (or the last task in the job)
