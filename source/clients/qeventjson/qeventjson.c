@@ -169,7 +169,7 @@ make_json_queue_list(char *json_buffer, lListElem *qp) {
 static void
 string_list_to_json_dstring(dstring *buffer, lList *list, int field) {
   const char *str;
-  char json_tmp[250];
+  char json_tmp[1024];
   bool first = true;
   lListElem *el;
 
@@ -180,7 +180,7 @@ string_list_to_json_dstring(dstring *buffer, lList *list, int field) {
         sge_dstring_append(buffer, ",");
       }
       str = lGetString(el, field);
-      json_emit_quoted_str(json_tmp, 50, str, strlen(str));
+      json_emit_quoted_str(json_tmp, 1024, str, strlen(str));
       sge_dstring_append(buffer, json_tmp);
       first = false;
     }
