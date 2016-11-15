@@ -886,6 +886,8 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
      u_long vmem = 0;
      u_long maxvmem = 0;
      u_long cpu = 0;
+     double io = 0;
+     u_long iow = 0;
      u_long end_time = 0;
      u_long exit_status = 0;
 
@@ -900,6 +902,10 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
          maxvmem = (u_long) lGetDouble(ua, UA_value);
        } else if (strcmp("cpu", fieldName) == 0) {
          cpu = (u_long) lGetDouble(ua, UA_value);
+       } else if (strcmp("io", fieldName) == 0) {
+         io = lGetDouble(ua, UA_value);
+       } else if (strcmp("iow", fieldName) == 0) {
+         iow = lGetDouble(ua, UA_value);
        } else if (strcmp("end_time", fieldName) == 0) {
          end_time = (u_long) lGetDouble(ua, UA_value);
        } else if (strcmp("exit_status", fieldName) == 0) {
@@ -909,16 +915,18 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
      }
 
      if (event_type == sgeE_JOB_USAGE) {
-       print_json("{s:s,s:u,s:u,s:u,s:u,s:u,s:u}",
+       print_json("{s:s,s:u,s:u,s:u,s:u,s:u,s:u,s:f,s:u}",
                   "event", "JOB_USAGE",
                   "timestamp", timestamp,
                   "job_id", job_id,
                   "task_id", task_id,
                   "vmem", vmem,
                   "maxvmem", maxvmem,
-                  "cpu", cpu);
+                  "cpu", cpu,
+                  "io", io,
+                  "iow", iow);
      } else {
-       print_json("{s:s,s:u,s:u,s:u,s:u,s:u,s:u,s:u,s:u}",
+       print_json("{s:s,s:u,s:u,s:u,s:u,s:u,s:u,s:f,s:u,s:u,s:u}",
                   "event", "JOB_FINAL_USAGE",
                   "timestamp", timestamp,
                   "job_id", job_id,
@@ -926,6 +934,8 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
                   "vmem", vmem,
                   "maxvmem", maxvmem,
                   "cpu", cpu,
+                  "io", io,
+                  "iow", iow,
                   "end_time", end_time,
                   "exit_status", exit_status);
      }
