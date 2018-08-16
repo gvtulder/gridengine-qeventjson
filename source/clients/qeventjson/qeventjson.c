@@ -81,6 +81,7 @@
 #include "sgeobj/sge_centry.h"
 #include "sgeobj/sge_resource_quota.h"
 #include "sgeobj/sge_ulong.h"
+#include "get_path.c"
 
 #include "gdi/sge_gdi_ctx.h"
 
@@ -236,7 +237,7 @@ print_json(const char *format, ...) {
    fflush(stdout);
 }
 
-static void print_jobs_not_enrolled(u_long32 event_type, u_long32 timestamp, u_long job_id, lListElem *job, const char *job_name, const char *owner, const char *queues_json, const char *resources_json, u_long n_slots, dstring *predecessor_request_list, dstring *predecessor_list, dstring *ad_predecessor_request_list, dstring *ad_predecessor_list, u_long submission_time) {
+static void print_jobs_not_enrolled(u_long32 event_type, u_long32 timestamp, u_long job_id, lListElem *job, const char *job_name, const char *owner, const char *queues_json, const char *resources_json, u_long n_slots, dstring *predecessor_request_list, dstring *predecessor_list, dstring *ad_predecessor_request_list, dstring *ad_predecessor_list, u_long submission_time, const char *stdout_path, const char *stderr_path) {
    lList *range_list[16];         /* RN_Type */
    u_long32 hold_state[16];
    int i;
@@ -265,11 +266,12 @@ static void print_jobs_not_enrolled(u_long32 event_type, u_long32 timestamp, u_l
                job_get_state_string(status_str, jstate);
 
                // print json
-               print_json("{s:s,s:u,s:i,s:i,s:s,s:s,s:S,s:S,s:u,s:S,s:S,s:S,s:S,s:u,s:f,s:s,s:u}",
+               print_json("{s:s,s:u,s:i,s:i,s:S,s:s,s:s,s:S,s:S,s:u,s:S,s:S,s:S,s:S,s:u,s:f,s:s,s:u}",
                           "event", (event_type==sgeE_JOB_ADD?"JOB_ADD":(event_type==sgeE_JOB_MOD?"JOB_MOD":"JOB_LIST")),
                           "timestamp", timestamp,
                           "job_id", job_id,
                           "task_id", (u_long) start,
+                          "array_job", (job_is_array(job) ? "true" : "false"),
                           "job_name", job_name,
                           "owner", owner,
                           "queues", queues_json,
@@ -282,7 +284,9 @@ static void print_jobs_not_enrolled(u_long32 event_type, u_long32 timestamp, u_l
                           "submission_time", submission_time,
                           "prio", prio,
                           "state", status_str,
-                          "start_time", (u_long)0);
+                          "start_time", (u_long)0,
+                          "stdout_path", stdout_path,
+                          "stderr_path", stderr_path);
             }
          }
       }
@@ -618,6 +622,24 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
        // number of slots
        u_long n_slots = range_list_get_first_id(lGetList(job, JB_pe_range), NULL);
 
+       // stdout and stderr paths
+       char stdout_path[SGE_PATH_MAX] = "";
+       char stderr_path[SGE_PATH_MAX] = "";
+       sge_get_path("dummy",
+                    lGetList(job, JB_stdout_path_list),
+                    lGetString(job, JB_cwd),
+                    lGetString(job, JB_owner),
+                    lGetString(job, JB_job_name),
+                    job_id, 0,
+                    SGE_STDOUT, stdout_path, SGE_PATH_MAX);
+       sge_get_path("dummy",
+                    lGetList(job, JB_stderr_path_list),
+                    lGetString(job, JB_cwd),
+                    lGetString(job, JB_owner),
+                    lGetString(job, JB_job_name),
+                    job_id, 0,
+                    SGE_STDERR, stderr_path, SGE_PATH_MAX);
+
        // predecessor lists
        dstring predecessor_request_list = DSTRING_INIT;
        dstring predecessor_list = DSTRING_INIT;
@@ -651,11 +673,12 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
 
          if (running_queue == NULL) {
            // print json
-           print_json("{s:s,s:u,s:u,s:u,s:s,s:s,s:S,s:S,s:u,s:S,s:S,s:S,s:S,s:u,s:u,s:f,s:s}",
+           print_json("{s:s,s:u,s:u,s:u,s:S,s:s,s:s,s:S,s:S,s:u,s:S,s:S,s:S,s:S,s:u,s:u,s:f,s:s,s:s,s:s}",
                       "event", "JOB_LIST",
                       "timestamp", timestamp,
                       "job_id", job_id,
                       "task_id", task_id,
+                      "array_job", (job_is_array(job) ? "true" : "false"),
                       "job_name", job_name,
                       "owner", owner,
                       "queues", queues_json,
@@ -668,14 +691,17 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
                       "submission_time", submission_time,
                       "start_time", start_time,
                       "prio", prio,
-                      "state", status_str);
+                      "state", status_str,
+                      "stdout_path", stdout_path,
+                      "stderr_path", stderr_path);
          } else {
            // print json
-           print_json("{s:s,s:u,s:u,s:u,s:s,s:s,s:S,s:S,s:u,s:S,s:S,s:S,s:S,s:u,s:u,s:s,s:f,s:s}",
+           print_json("{s:s,s:u,s:u,s:u,s:S,s:s,s:s,s:S,s:S,s:u,s:S,s:S,s:S,s:S,s:u,s:u,s:s,s:f,s:s,s:s,s:s}",
                       "event", "JOB_LIST",
                       "timestamp", timestamp,
                       "job_id", job_id,
                       "task_id", task_id,
+                      "array_job", (job_is_array(job) ? "true" : "false"),
                       "job_name", job_name,
                       "owner", owner,
                       "queues", queues_json,
@@ -689,13 +715,15 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
                       "start_time", start_time,
                       "running_queue", running_queue,
                       "prio", prio,
-                      "state", status_str);
+                      "state", status_str,
+                      "stdout_path", stdout_path,
+                      "stderr_path", stderr_path);
          }
 
          jatask = lNext(jatask);
        }
 
-       print_jobs_not_enrolled(event_type, timestamp, job_id, job, job_name, owner, queues_json, resources_json, n_slots, &predecessor_request_list, &predecessor_list, &ad_predecessor_request_list, &ad_predecessor_list, submission_time);
+       print_jobs_not_enrolled(event_type, timestamp, job_id, job, job_name, owner, queues_json, resources_json, n_slots, &predecessor_request_list, &predecessor_list, &ad_predecessor_request_list, &ad_predecessor_list, submission_time, stdout_path, stderr_path);
 
        sge_dstring_free(&predecessor_request_list);
        sge_dstring_free(&predecessor_list);
@@ -747,10 +775,30 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
      char resources_json[1000];
      make_json_resource_list(resources_json, lFirst(lGetList(job, JB_hard_resource_list)));
 
+     // stdout and stderr paths
+     char stdout_path[SGE_PATH_MAX] = "";
+     char stderr_path[SGE_PATH_MAX] = "";
+     sge_get_path("dummy",
+                  lGetList(job, JB_stdout_path_list),
+                  lGetString(job, JB_cwd),
+                  lGetString(job, JB_owner),
+                  lGetString(job, JB_job_name),
+                  job_id,
+                  task_id,
+                  SGE_STDOUT, stdout_path, SGE_PATH_MAX);
+     sge_get_path("dummy",
+                  lGetList(job, JB_stderr_path_list),
+                  lGetString(job, JB_cwd),
+                  lGetString(job, JB_owner),
+                  lGetString(job, JB_job_name),
+                  job_id,
+                  task_id,
+                  SGE_STDERR, stderr_path, SGE_PATH_MAX);
+
      // for a specific task?
      if (task_id == 0) {
        // no specific task
-       print_jobs_not_enrolled(event_type, timestamp, job_id, job, job_name, owner, queues_json, resources_json, n_slots, &predecessor_request_list, &predecessor_list, &ad_predecessor_request_list, &ad_predecessor_list, submission_time);
+       print_jobs_not_enrolled(event_type, timestamp, job_id, job, job_name, owner, queues_json, resources_json, n_slots, &predecessor_request_list, &predecessor_list, &ad_predecessor_request_list, &ad_predecessor_list, submission_time, stdout_path, stderr_path);
 
      } else {
        lList *jatasks = lGetList(job, JB_ja_tasks);
@@ -762,11 +810,12 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
 
        if (running_queue == NULL) {
          // print json
-         print_json("{s:s,s:u,s:u,s:u,s:s,s:s,s:S,s:S,s:u,s:S,s:S,s:S,s:S,s:u}",
+         print_json("{s:s,s:u,s:u,s:u,s:S,s:s,s:s,s:S,s:S,s:u,s:S,s:S,s:S,s:S,s:u,s:s,s:s}",
                     "event", (event_type==sgeE_JOB_ADD?"JOB_ADD":"JOB_MOD"),
                     "timestamp", timestamp,
                     "job_id", job_id,
                     "task_id", task_id,
+                    "array_job", (job_is_array(job) ? "true" : "false"),
                     "job_name", job_name,
                     "owner", owner,
                     "queues", queues_json,
@@ -776,14 +825,17 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
                     "predecessor_list", sge_dstring_get_string(&predecessor_list),
                     "ad_predecessor_request_list", sge_dstring_get_string(&ad_predecessor_request_list),
                     "ad_predecessor_list", sge_dstring_get_string(&ad_predecessor_list),
-                    "submission_time", submission_time);
+                    "submission_time", submission_time,
+                    "stdout_path", stdout_path,
+                    "stderr_path", stderr_path);
        } else {
          // print json
-         print_json("{s:s,s:u,s:u,s:u,s:s,s:s,s:S,s:S,s:s,s:u,s:S,s:S,s:S,s:S,s:u}",
+         print_json("{s:s,s:u,s:u,s:u,s:S,s:s,s:s,s:S,s:S,s:s,s:u,s:S,s:S,s:S,s:S,s:u,s:s,s:s}",
                     "event", (event_type==sgeE_JOB_ADD?"JOB_ADD":"JOB_MOD"),
                     "timestamp", timestamp,
                     "job_id", job_id,
                     "task_id", task_id,
+                    "array_job", (job_is_array(job) ? "true" : "false"),
                     "job_name", job_name,
                     "owner", owner,
                     "queues", queues_json,
@@ -794,7 +846,9 @@ print_event(sge_evc_class_t *evc, object_description *object_base, sge_object_ty
                     "predecessor_list", sge_dstring_get_string(&predecessor_list),
                     "ad_predecessor_request_list", sge_dstring_get_string(&ad_predecessor_request_list),
                     "ad_predecessor_list", sge_dstring_get_string(&ad_predecessor_list),
-                    "submission_time", submission_time);
+                    "submission_time", submission_time,
+                    "stdout_path", stdout_path,
+                    "stderr_path", stderr_path);
        }
      }
 
